@@ -1,6 +1,5 @@
 import asyncio
 import json
-import selectors
 import time
 from datetime import datetime, timedelta, timezone
 from itertools import islice
@@ -28,6 +27,7 @@ from litellm.litellm_core_utils.core_helpers import get_litellm_metadata_from_kw
 from litellm.litellm_core_utils.litellm_logging import Logging as LitellmLogging
 from litellm.proxy.spend_tracking.spend_tracking_utils import get_logging_payload
 from litellm.types.interactions import InteractionsAPIResponse
+from tests._support.clock_loops import AutojumpClockLoop
 
 USAGE_BLOCK = {
     "total_tokens": 175,
@@ -1426,37 +1426,6 @@ async def test_create_on_a_replica_without_the_settlement_table_still_settles_in
         await task
 
 
-class _VirtualClock:
-    def __init__(self) -> None:
-        self.now: float = 0.0
-
-
-class _ClockAdvancingSelector(selectors.DefaultSelector):
-    """Waits on no timer: when nothing is ready, time jumps straight to the next timer the loop is waiting for."""
-
-    def __init__(self, clock: _VirtualClock) -> None:
-        super().__init__()
-        self._clock: Final = clock
-
-    def select(self, timeout: float | None = None) -> list[tuple[selectors.SelectorKey, int]]:
-        ready: Final = super().select(0)
-        if ready:
-            return ready
-        if timeout is None:
-            return super().select(None)
-        self._clock.now += timeout
-        return ready
-
-
-class _VirtualTimeLoop(asyncio.SelectorEventLoop):
-    def __init__(self, clock: _VirtualClock) -> None:
-        super().__init__(_ClockAdvancingSelector(clock))
-        self._clock: Final = clock
-
-    def time(self) -> float:
-        return self._clock.now
-
-
 class _JobFinishingAt:
     def __init__(self, finishes_at: float) -> None:
         self.finishes_at: Final = finishes_at
@@ -1480,7 +1449,7 @@ async def _finish_owned_loop_tasks() -> None:
 def _poll_on_a_virtual_clock(
     context: BackgroundInteractionPollContext, job: _JobFinishingAt
 ) -> SettlementOutcome | None:
-    loop: Final = _VirtualTimeLoop(_VirtualClock())
+    loop: Final = AutojumpClockLoop()
     try:
         return loop.run_until_complete(poll_and_log_background_interaction_cost(context, fetch_interaction=job.fetch))
     finally:

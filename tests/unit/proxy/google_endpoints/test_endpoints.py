@@ -212,6 +212,7 @@ _VERTEX_GROUP: Final = "vertex-argon"
 _VERTEX_DEEP_RESEARCH_GROUP: Final = "vertex-dr"
 _DEEP_RESEARCH_AGENT: Final = "deep-research-preview-04-2026"
 _SPLIT_GROUP: Final = "vertex-split"
+_SHARED_GROUP: Final = "vertex-shared"
 _SPLIT_DEPLOYMENTS: Final = MappingProxyType({"split-east": "east-project", "split-west": "west-project"})
 _VERTEX_COLLECTION_URL: Final = (
     "https://aiplatform.googleapis.com/v1beta1/projects/deployment-project/locations/global/interactions"
@@ -233,6 +234,7 @@ def _vertex_deployment(
     project: str = "deployment-project",
     deployment_id: str | None = None,
     order: int | None = None,
+    access_group: str | None = None,
 ) -> Mapping[str, object]:
     credentials: Final = {
         "type": "authorized_user",
@@ -250,7 +252,16 @@ def _vertex_deployment(
             "vertex_credentials": json.dumps(credentials),
             **({"order": order} if order is not None else {}),
         },
-        **({"model_info": {"id": deployment_id}} if deployment_id is not None else {}),
+        **(
+            {
+                "model_info": {
+                    "id": deployment_id,
+                    **({"access_groups": [access_group]} if access_group is not None else {}),
+                }
+            }
+            if deployment_id is not None
+            else {}
+        ),
     }
 
 
@@ -276,6 +287,12 @@ def interactions_proxy(
             _vertex_deployment(_VERTEX_DEEP_RESEARCH_GROUP, f"vertex_ai/{_DEEP_RESEARCH_AGENT}"),
             _vertex_deployment(_SPLIT_GROUP, "vertex_ai/gemini-4-argon", "east-project", "split-east", order=1),
             _vertex_deployment(_SPLIT_GROUP, "vertex_ai/gemini-4-argon", "west-project", "split-west", order=2),
+            _vertex_deployment(
+                _SHARED_GROUP, "vertex_ai/gemini-4-argon", "pub-project", "shared-pub", access_group="public"
+            ),
+            _vertex_deployment(
+                _SHARED_GROUP, "vertex_ai/gemini-4-argon", "priv-project", "shared-priv", access_group="private"
+            ),
         ]
     )
     proxy_server.cleanup_router_config_variables()
@@ -662,3 +679,84 @@ def test_a_follow_up_by_deployment_id_is_refused_when_the_key_cannot_call_its_gr
     assert response.status_code == 403, response.text
     assert not respx_mock.calls
     assert not google_oauth.calls
+
+
+_PUBLIC_KEY: Final = UserAPIKeyAuth(models=["public"])
+_PUBLIC_TEAM_KEY: Final = UserAPIKeyAuth(team_id="team-public", team_models=["public"])
+_PUBLIC_TEAM: Final = LiteLLM_TeamTableCachedObj(team_id="team-public", models=["public"])
+
+
+@pytest.mark.parametrize("selector", ("query", "header"))
+@pytest.mark.parametrize(("method", "path"), _BY_ID_ROUTES)
+@pytest.mark.parametrize(
+    ("key", "teams"),
+    (
+        pytest.param(_PUBLIC_KEY, (), id="key-access-group"),
+        pytest.param(_PUBLIC_TEAM_KEY, (_PUBLIC_TEAM,), id="team-access-group"),
+    ),
+)
+def test_a_follow_up_pinned_to_a_deployment_outside_the_callers_access_group_is_refused(
+    interactions_proxy: TestClient,
+    respx_mock: respx.MockRouter,
+    google_oauth: responses.RequestsMock,
+    key: UserAPIKeyAuth,
+    teams: tuple[LiteLLM_TeamTableCachedObj, ...],
+    method: str,
+    path: str,
+    selector: str,
+) -> None:
+    params, headers = _deployment_selector(selector, "shared-priv")
+
+    with _cached_key(key, *teams) as authorization:
+        response: Final = interactions_proxy.request(
+            method, path, params=params, headers={**headers, "authorization": authorization}
+        )
+
+    assert response.status_code == 400, response.text
+    assert not respx_mock.calls
+    assert not google_oauth.calls
+
+
+@pytest.mark.parametrize("selector", ("query", "header"))
+@pytest.mark.parametrize(
+    ("key", "teams", "model", "project"),
+    (
+        pytest.param(_PUBLIC_KEY, (), "shared-pub", "pub-project", id="key-access-group-pins-its-deployment"),
+        pytest.param(
+            _PUBLIC_TEAM_KEY, (_PUBLIC_TEAM,), "shared-pub", "pub-project", id="team-access-group-pins-its-deployment"
+        ),
+        pytest.param(_PUBLIC_KEY, (), _SHARED_GROUP, "pub-project", id="key-access-group-group-route"),
+        pytest.param(
+            _PUBLIC_TEAM_KEY, (_PUBLIC_TEAM,), _SHARED_GROUP, "pub-project", id="team-access-group-group-route"
+        ),
+        pytest.param(
+            UserAPIKeyAuth(models=[_SHARED_GROUP]), (), "shared-priv", "priv-project", id="owning-group-pins-any"
+        ),
+        pytest.param(
+            UserAPIKeyAuth(models=["private"]), (), "shared-priv", "priv-project", id="private-access-group-pins-its"
+        ),
+    ),
+)
+def test_a_follow_up_reaches_a_deployment_the_callers_grant_covers(
+    interactions_proxy: TestClient,
+    respx_mock: respx.MockRouter,
+    key: UserAPIKeyAuth,
+    teams: tuple[LiteLLM_TeamTableCachedObj, ...],
+    model: str,
+    project: str,
+    selector: str,
+) -> None:
+    upstream: Final = respx_mock.get(f"{_project_url(project)}/{_INTERACTION_ID}").mock(
+        return_value=httpx.Response(200, json=_INTERACTION)
+    )
+    params, headers = _deployment_selector(selector, model)
+
+    with _cached_key(key, *teams) as authorization:
+        response: Final = interactions_proxy.get(
+            f"/v1beta/interactions/{_INTERACTION_ID}",
+            params=params,
+            headers={**headers, "authorization": authorization},
+        )
+
+    assert response.status_code == 200, response.text
+    assert upstream.call_count == 1

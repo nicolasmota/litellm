@@ -2017,8 +2017,8 @@ def test_get_model_from_request_authorizes_an_interaction_deployment_id_selector
 ) -> None:
     router: Final = Router(
         model_list=[
-            {"model_name": "alpha", "litellm_params": {"model": "openai/gpt-5.6"}, "model_info": {"id": "beta"}},
-            {"model_name": "beta", "litellm_params": {"model": "openai/gpt-5.6"}, "model_info": {"id": "beta-id"}},
+            {"model_name": "alpha", "litellm_params": {"model": "openai/gpt-6-astra"}, "model_info": {"id": "beta"}},
+            {"model_name": "beta", "litellm_params": {"model": "openai/gpt-6-astra"}, "model_info": {"id": "beta-id"}},
         ]
     )
 
