@@ -2699,7 +2699,10 @@ def _extract_model_candidates_from_request(
 
     body_model: Final = request_data.get("model")
     _append_model_candidates(
-        candidates, _group_of_deployment_selector(body_model, llm_router) if selects_by_interaction_id else body_model
+        candidates,
+        _group_of_deployment_selector(body_model, llm_router)
+        if selects_by_interaction_id and isinstance(body_model, str)
+        else body_model,
     )
     if uses_body_target_model_sources or not body_model:
         _append_model_candidates(candidates, request_data.get("target_model_names"))
